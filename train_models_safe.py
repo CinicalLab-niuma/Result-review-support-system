@@ -142,44 +142,61 @@ print(df_results.to_string(index=False))
 print(f"\n>> Best Model Selected: {best_model_name}")
 
 # ==========================================
-# 4. SHAP analysis (for the best model)
-# ==========================================
-print(f"\nGenerating SHAP explanations for {best_model_name}...")
+# 4. Construct a [strong anti-overfitting] model library
+models = {
+    "Logistic_Regression": make_pipeline(
+        StandardScaler(), 
+        # C=0.1 adds an extremely strong L2 regularization penalty that prevents the weights from being too large
+        LogisticRegression(C=0.1, class_weight='balanced', random_state=42, max_iter=2000)
+    ),
+    "Random_Forest": RandomForestClassifier(
+        n_estimators=100, class_weight='balanced', random_state=42, 
+        max_depth=3, # The tree depth is limited to an extremely shallow 3 levels
+        min_samples_leaf=10 
+    ),
+    "XGBoost": XGBClassifier(
+        eval_metric='logloss', random_state=42,
+        max_depth=3,          
+        learning_rate=0.05,   # Reducing the learning rate
+        subsample=0.7,        # Only 70% of the data is used to build the tree
+        colsample_bytree=0.7, # Only 70% of the features were used to build the tree
+        reg_lambda=10         # Extremely strong L2 regularization
+    ),
+    "LightGBM": LGBMClassifier(
+        random_state=42, verbose=-1, max_depth=3, subsample=0.7, reg_lambda=10
+    ),
+    "CatBoost": CatBoostClassifier(
+        verbose=0, random_state=42, auto_class_weights='Balanced',
+        depth=3, l2_leaf_reg=10
+    )
+}
 
-if best_model_name in ["Logistic_Regression", "SVM_RBF"]:
-    core_model = best_model.named_steps[best_model_name.split('_')[0].lower() if 'SVM' not in best_model_name else 'svc']
-    X_test_transformed = best_model.named_steps['standardscaler'].transform(X_test)
+# 3. 5-Fold Cross Validation
+print("Starting 5-Fold Cross Validation to rigorously evaluate models...")
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+results = []
+
+for name, model in models.items():
+    print(f"Evaluating {name}...")
+    # Five splits, training, and validation are automatically performed
+    cv_scores = cross_validate(
+        model, X, y, cv=cv, 
+        scoring={'roc_auc': 'roc_auc', 'accuracy': 'accuracy'},
+        n_jobs=4
+    )
     
-    # SVM / LR 
-    explainer = shap.Explainer(core_model, X_train)
-    shap_values = explainer(X_test_transformed)
+    mean_auc = cv_scores['test_roc_auc'].mean()
+    std_auc = cv_scores['test_roc_auc'].std()
+    mean_acc = cv_scores['test_accuracy'].mean()
     
-    # Draw the SHAP swarming map
-    plt.figure()
-    shap.summary_plot(shap_values, X_test, show=False)
-    plt.savefig('shap_summary_beeswarm.png', dpi=300, bbox_inches='tight')
-    plt.close()
+    results.append({
+        "Model": name.replace('_', ' '),
+        "Mean AUC (5-Fold)": f"{mean_auc:.3f} ± {std_auc:.3f}",
+        "Mean Accuracy": f"{mean_acc:.3f}"
+    })
 
-    plt.figure()
-    shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
-    plt.savefig('shap_feature_importance.png', dpi=300, bbox_inches='tight')
-    plt.close()
-
-else:
-    explainer = shap.TreeExplainer(best_model)
-    shap_values = explainer.shap_values(X_test)
-    
-    if isinstance(shap_values, list):
-        shap_values = shap_values[1]
-        
-    plt.figure()
-    shap.summary_plot(shap_values, X_test, show=False)
-    plt.savefig('shap_summary_beeswarm.png', dpi=300, bbox_inches='tight')
-    plt.close()
-
-    plt.figure()
-    shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
-    plt.savefig('shap_feature_importance.png', dpi=300, bbox_inches='tight')
-    plt.close()
-
-print("\nAll tasks completed successfully! Check the current directory for PNG and CSV files.")
+# 4. Output
+df_results = pd.DataFrame(results).sort_values(by="Mean AUC (5-Fold)", ascending=False)
+print("\n=== Robust Performance Ranking (5-Fold CV) ===")
+print(df_results.to_string(index=False))
